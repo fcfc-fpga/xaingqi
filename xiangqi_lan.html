@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>中国象棋局域网对战</title>
+  <style>
+    /* 基础样式 */
+    body {
+      margin: 0;
+      padding: 0;
+      background: #f4f4f4;
+      font-family: "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif;
+      color: #333;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    h1 {
+      margin-top: 20px;
+      font-size: 24px;
+    }
+
+    /* 棋盘容器 */
+    #board-wrapper {
+      position: relative;
+      width: 600px;
+      height: 660px; /* 9行网格间距 + 上下边距 */
+      margin-top: 20px;
+      border: 2px solid #333;
+      background: #faf8ef;
+    }
+
+    /* canvas 用来绘制棋盘线条 */
+    #board-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    /* 棋子容器 */
+    #pieces {
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 100%;
+      height: 100%;
+    }
+
+    .piece {
+      position: absolute;
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      line-height: 60px;
+      text-align: center;
+      font-size: 32px;
+      font-weight: bold;
+      cursor: pointer;
+      user-select: none;
+      transition: transform 0.1s ease;
+    }
+
+    .piece.red {
+      background: #fdd;
+      color: #a00;
+      border: 2px solid #a00;
+    }
+
+    .piece.black {
+      background: #eef;
+      color: #00a;
+      border: 2px solid #00a;
+    }
+
+    /* 高亮可移动目标 */
+    .target {
+      box-shadow: 0 0 0 3px rgba(0, 128, 0, 0.5);
+    }
+
+    /* 信息栏 */
+    #status {
+      margin-top: 10px;
+      font-size: 16px;
+    }
+  </style>
+</head>
+<body>
+  <h1>中国象棋局域网对战</h1>
+  <div id="board-wrapper">
+    <canvas id="board-canvas" width="600" height="660"></canvas>
+    <div id="pieces"></div>
+  </div>
+  <div id="status"></div>
+
+  <script>
+    // ========== 游戏逻辑与网络通信 ==========
+    (function() {
+      const canvas = document.getElementById('board-canvas');
+      const ctx = canvas.getContext('2d');
+      const piecesContainer = document.getElementById('pieces');
+      const statusEl = document.getElementById('status');
+
+      const COLS = 9;
+      const ROWS = 10;
+      const CELL_WIDTH = canvas.width / (COLS - 1);
+      const CELL_HEIGHT = canvas.height / (ROWS - 1);
+
+      // 棋盘状态数组，10行9列
+      let board = [];
+      // 当前选中的棋子位置
+      let selected = null;
+      // 当前玩家颜色（red 或 black），默认观战，待服务器分配
+      let myColor = null;
+      // WebSocket
+      let socket = null;
+
+      /**
+       * 定义棋子
+       * id: 唯一标识符
+       * type: 类型（K:将/帅, A:士/仕, B:象/相, N:马, R:车, C:炮, P:卒/兵）
+       * color: red 或 black
+       * char: 显示的汉字
+       */
+      function createPiece(type, color) {
+        const map = {
+          K: { red: '帅', black: '将' },
+          A: { red: '仕', black: '士' },
+          B: { red: '相', black: '象' },
+          N: { red: '马', black: '马' },
+          R: { red: '车', black: '车' },
+          C: { red: '炮', black: '炮' },
+          P: { red: '兵', black: '卒' }
+        };
+        return {
+          type,
+          color,
+          char: map[type][color]
+        };
+      }
+
+      /**
+       * 初始化棋盘
+       */
+      function initBoard() {
+        board = new Array(ROWS);
+        for (let r = 0; r < ROWS; r++) {
+          board[r] = new Array(COLS).fill(null);
+        }
+        // 放置黑棋
+        board[0][0] = createPiece('R', 'black');
+        board[0][1] = createPiece('N', 'black');
+        board[0][2] = createPiece('B', 'black');
+        board[0][3] = createPiece('A', 'black');
+        board[0][4] = createPiece('K', 'black');
+        board[0][5] = createPiece('A', 'black');
+        board[0][6] = createPiece('B', 'black');
+        board[0][7] = createPiece('N', 'black');
+        board[0][8] = createPiece('R', 'black');
+        board[2][1] = createPiece('C', 'black');
+        board[2][7] = createPiece('C', 'black');
+        board[3][0] = createPiece('P', 'black');
+        board[3][2] = createPiece('P', 'black');
+        board[3][4] = createPiece('P', 'black');
+        board[3][6] = createPiece('P', 'black');
+        board[3][8] = createPiece('P', 'black');
+        // 放置红棋
+        board[9][0] = createPiece('R', 'red');
+        board[9][1] = createPiece('N', 'red');
+        board[9][2] = createPiece('B', 'red');
+        board[9][3] = createPiece('A', 'red');
+        board[9][4] = createPiece('K', 'red');
+        board[9][5] = createPiece('A', 'red');
+        board[9][6] = createPiece('B', 'red');
+        board[9][7] = createPiece('N', 'red');
+        board[9][8] = createPiece('R', 'red');
+        board[7][1] = createPiece('C', 'red');
+        board[7][7] = createPiece('C', 'red');
+        board[6][0] = createPiece('P', 'red');
+        board[6][2] = createPiece('P', 'red');
+        board[6][4] = createPiece('P', 'red');
+        board[6][6] = createPiece('P', 'red');
+        board[6][8] = createPiece('P', 'red');
+      }
+
+      /**
+       * 绘制棋盘线条
+       */
+      function drawBoard() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        // 画横线
+        for (let r = 0; r < ROWS; r++) {
+          const y = r * CELL_HEIGHT;
+          // 横线两端留边框
+          ctx.beginPath();
+          ctx.moveTo(0, y);
+          ctx.lineTo((COLS - 1) * CELL_WIDTH, y);
+          ctx.stroke();
+        }
+        // 画竖线
+        for (let c = 0; c < COLS; c++) {
+          const x = c * CELL_WIDTH;
+          ctx.beginPath();
+          ctx.moveTo(x, 0);
+          ctx.lineTo(x, 4 * CELL_HEIGHT);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.moveTo(x, 5 * CELL_HEIGHT);
+          ctx.lineTo(x, (ROWS - 1) * CELL_HEIGHT);
+          ctx.stroke();
+        }
+        // 画九宫斜线
+        // 黑方九宫
+        ctx.beginPath();
+        ctx.moveTo(3 * CELL_WIDTH, 0);
+        ctx.lineTo(5 * CELL_WIDTH, 2 * CELL_HEIGHT);
+        ctx.moveTo(5 * CELL_WIDTH, 0);
+        ctx.lineTo(3 * CELL_WIDTH, 2 * CELL_HEIGHT);
+        ctx.stroke();
+        // 红方九宫
+        ctx.beginPath();
+        ctx.moveTo(3 * CELL_WIDTH, 7 * CELL_HEIGHT);
+        ctx.lineTo(5 * CELL_WIDTH, 9 * CELL_HEIGHT);
+        ctx.moveTo(5 * CELL_WIDTH, 7 * CELL_HEIGHT);
+        ctx.lineTo(3 * CELL_WIDTH, 9 * CELL_HEIGHT);
+        ctx.stroke();
+      }
+
+      /**
+       * 更新页面上棋子的 DOM
+       */
+      function renderPieces() {
+        piecesContainer.innerHTML = '';
+        for (let r = 0; r < ROWS; r++) {
+          for (let c = 0; c < COLS; c++) {
+            const piece = board[r][c];
+            if (piece) {
+              const div = document.createElement('div');
+              div.classList.add('piece', piece.color);
+              div.textContent = piece.char;
+              div.style.left = `${c * CELL_WIDTH - 30}px`;
+              div.style.top = `${r * CELL_HEIGHT - 30}px`;
+              div.dataset.row = r;
+              div.dataset.col = c;
+              piecesContainer.appendChild(div);
+            }
+          }
+        }
+      }
+
+      /**
+       * 计算给定坐标棋子的合法走法
+       * 返回目标数组 [{r,c}]
+       */
+      function getMoves(r, c) {
+        const piece = board[r][c];
+        if (!piece) return [];
+        const moves = [];
+        const color = piece.color;
+        const opp = color === 'red' ? 'black' : 'red';
+        const insidePalace = (row, col, colRange, rowRange) => {
+          return col >= colRange[0] && col <= colRange[1] && row >= rowRange[0] && row <= rowRange[1];
+        };
+        // 检查目标是否同色或者越界
+        function canMoveTo(nr, nc, captureOnly = false, jump = false) {
+          if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) return false;
+          const target = board[nr][nc];
+          if (!target) return !captureOnly; // 目标为空，则允许普通移动
+          return !jump && target.color !== color; // 捕获对方
+        }
+        // 具体棋子规则
+        switch (piece.type) {
+          case 'R': // 车
+            // 四个方向探测
+            [ [1,0], [-1,0], [0,1], [0,-1] ].forEach(([dr,dc]) => {
+              let nr = r + dr;
+              let nc = c + dc;
+              while (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                if (!board[nr][nc]) {
+                  moves.push({r: nr, c: nc});
+                } else {
+                  if (board[nr][nc].color !== color) moves.push({r: nr, c: nc});
+                  break;
+                }
+                nr += dr;
+                nc += dc;
+              }
+            });
+            break;
+          case 'N': // 马
+            const knightMoves = [
+              { step: [ -1, 0 ], leaps: [ -2, 1 ] },
+              { step: [ 1, 0 ], leaps: [ 2, 1 ] },
+              { step: [ 0, -1 ], leaps: [ 1, -2 ] },
+              { step: [ 0, 1 ], leaps: [ 1, 2 ] },
+              { step: [ -1, 0 ], leaps: [ -2, -1 ] },
+              { step: [ 1, 0 ], leaps: [ 2, -1 ] },
+              { step: [ 0, -1 ], leaps: [ -1, -2 ] },
+              { step: [ 0, 1 ], leaps: [ -1, 2 ] }
+            ];
+            // Actually it's easier: we compute each potential move; we check the blocking square (the horse's leg)
+            const dirs = [
+              [ -2, -1 ], [ -2, 1 ], [ 2, -1 ], [ 2, 1 ],
+              [ -1, -2 ], [ -1, 2 ], [ 1, -2 ], [ 1, 2 ]
+            ];
+            dirs.forEach(([dr,dc]) => {
+              const nr = r + dr;
+              const nc = c + dc;
+              // Determine blocking square
+              let br, bc;
+              if (Math.abs(dr) === 2) {
+                br = r + dr/2;
+                bc = c;
+              } else {
+                br = r;
+                bc = c + dc/2;
+              }
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !board[br][bc]) {
+                const target = board[nr][nc];
+                if (!target || target.color !== color) moves.push({r: nr, c: nc});
+              }
+            });
+            break;
+          case 'B': // 象/相
+            const bishopDirs = [ [ -2, -2 ], [ -2, 2 ], [ 2, -2 ], [ 2, 2 ] ];
+            bishopDirs.forEach(([dr,dc]) => {
+              const nr = r + dr;
+              const nc = c + dc;
+              const mr = r + dr / 2;
+              const mc = c + dc / 2;
+              // 象不能过河：黑方 r <= 4；红方 r >= 5
+              if ((piece.color === 'black' && nr > 4) || (piece.color === 'red' && nr < 5)) return;
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && !board[mr][mc]) {
+                const target = board[nr][nc];
+                if (!target || target.color !== color) moves.push({r: nr, c: nc});
+              }
+            });
+            break;
+          case 'A': // 士/仕
+            const advisorDirs = [ [ -1, -1 ], [ -1, 1 ], [ 1, -1 ], [ 1, 1 ] ];
+            advisorDirs.forEach(([dr,dc]) => {
+              const nr = r + dr;
+              const nc = c + dc;
+              // 必须在九宫内
+              const palaceColRange = [3,5];
+              const palaceRowRange = piece.color === 'black' ? [0,2] : [7,9];
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && insidePalace(nr, nc, palaceColRange, palaceRowRange)) {
+                const target = board[nr][nc];
+                if (!target || target.color !== color) moves.push({r: nr, c: nc});
+              }
+            });
+            break;
+          case 'K': // 将/帅
+            const kingDirs = [ [ -1, 0 ], [ 1, 0 ], [ 0, -1 ], [ 0, 1 ] ];
+            kingDirs.forEach(([dr,dc]) => {
+              const nr = r + dr;
+              const nc = c + dc;
+              const palaceColRange = [3,5];
+              const palaceRowRange = piece.color === 'black' ? [0,2] : [7,9];
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS && insidePalace(nr, nc, palaceColRange, palaceRowRange)) {
+                const target = board[nr][nc];
+                if (!target || target.color !== color) moves.push({r: nr, c: nc});
+              }
+            });
+            // 飞将：如果对面没有阻挡，可以直取对方将
+            let oppR = null;
+            let oppC = null;
+            outer: for (let i = r + (color === 'red' ? -1 : 1); (color === 'red' ? i >= 0 : i < ROWS); i += (color === 'red' ? -1 : 1)) {
+              const cell = board[i][c];
+              if (cell) {
+                if (cell.type === 'K' && cell.color !== color) {
+                  oppR = i;
+                  oppC = c;
+                }
+                break;
+              }
+            }
+            if (oppR !== null) {
+              moves.push({r: oppR, c: oppC});
+            }
+            break;
+          case 'C': // 炮
+            // 炮类似车，但吃子必须隔山跳
+            [ [1,0], [-1,0], [0,1], [0,-1] ].forEach(([dr,dc]) => {
+              let nr = r + dr;
+              let nc = c + dc;
+              // 第一阶段：移动阶段，无跳过
+              while (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                if (!board[nr][nc]) {
+                  moves.push({r: nr, c: nc});
+                  nr += dr;
+                  nc += dc;
+                } else {
+                  break;
+                }
+              }
+              // 第二阶段：寻找第一个阻挡之后的敌方作为捕捉目标
+              if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                nr += dr;
+                nc += dc;
+                while (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                  if (board[nr][nc]) {
+                    if (board[nr][nc].color !== color) moves.push({r: nr, c: nc});
+                    break;
+                  }
+                  nr += dr;
+                  nc += dc;
+                }
+              }
+            });
+            break;
+          case 'P': // 兵/卒
+            const forward = piece.color === 'red' ? -1 : 1;
+            const startRow = piece.color === 'red' ? 5 : 4;
+            // 向前
+            let nr = r + forward;
+            let nc = c;
+            if (nr >= 0 && nr < ROWS && (!board[nr][nc] || board[nr][nc].color !== color)) {
+              moves.push({r: nr, c: nc});
+            }
+            // 过河后可以左右走
+            if ((piece.color === 'red' && r < startRow) || (piece.color === 'black' && r > startRow)) {
+              [ [0,-1], [0,1] ].forEach(([dr,dc]) => {
+                nr = r + dr;
+                nc = c + dc;
+                if (nr >= 0 && nr < ROWS && nc >= 0 && nc < COLS) {
+                  const target = board[nr][nc];
+                  if (!target || target.color !== color) moves.push({r: nr, c: nc});
+                }
+              });
+            }
+            break;
+        }
+        return moves;
+      }
+
+      /**
+       * 渲染可走目标高亮
+       */
+      function highlightTargets(targets) {
+        // 移除旧高亮
+        Array.from(piecesContainer.children).forEach(elem => elem.classList.remove('target'));
+        targets.forEach(({r,c}) => {
+          const targetElem = Array.from(piecesContainer.children).find(el => Number(el.dataset.row) === r && Number(el.dataset.col) === c);
+          if (targetElem) {
+            targetElem.classList.add('target');
+          } else {
+            // 空的目的地，高亮虚拟位置
+            const dummy = document.createElement('div');
+            dummy.classList.add('piece','target');
+            dummy.style.width = '20px';
+            dummy.style.height = '20px';
+            dummy.style.left = `${c * CELL_WIDTH - 10}px`;
+            dummy.style.top = `${r * CELL_HEIGHT - 10}px`;
+            dummy.style.borderRadius = '50%';
+            dummy.style.background = 'rgba(0,255,0,0.3)';
+            dummy.dataset.row = r;
+            dummy.dataset.col = c;
+            piecesContainer.appendChild(dummy);
+          }
+        });
+      }
+
+      /**
+       * 移动棋子并同步到服务器
+       */
+      function movePiece(from, to, send = true) {
+        const piece = board[from.r][from.c];
+        if (!piece) return;
+        board[to.r][to.c] = piece;
+        board[from.r][from.c] = null;
+        renderPieces();
+        selected = null;
+        highlightTargets([]);
+        if (send && socket) {
+          socket.send(JSON.stringify({ type: 'move', from, to }));
+        }
+      }
+
+      /**
+       * 处理棋子点击
+       */
+      function onPieceClick(e) {
+        const target = e.target;
+        const r = Number(target.dataset.row);
+        const c = Number(target.dataset.col);
+        const piece = board[r][c];
+        if (!piece) return;
+        if (!myColor) {
+          alert('等待服务器分配颜色...');
+          return;
+        }
+        // 如果之前没有选择棋子
+        if (!selected) {
+          if (piece.color !== myColor) return; // 不是自己颜色不能选
+          selected = { r, c };
+          const moves = getMoves(r, c);
+          highlightTargets(moves);
+        } else {
+          // 如果点击同颜色，切换选择
+          if (piece.color === myColor) {
+            selected = { r, c };
+            const moves = getMoves(r, c);
+            highlightTargets(moves);
+          } else {
+            // 点击敌方棋子，如果可以吃
+            const moves = getMoves(selected.r, selected.c);
+            if (moves.some(m => m.r === r && m.c === c)) {
+              movePiece(selected, { r, c }, true);
+            }
+          }
+        }
+      }
+
+      /**
+       * 点击空白棋盘
+       */
+      function onBoardClick(e) {
+        if (!selected) return;
+        // 计算点击位置的行列
+        const rect = canvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+        const c = Math.round(x / CELL_WIDTH);
+        const r = Math.round(y / CELL_HEIGHT);
+        const moves = getMoves(selected.r, selected.c);
+        if (moves.some(m => m.r === r && m.c === c) && !board[r][c]) {
+          movePiece(selected, { r, c }, true);
+        }
+      }
+
+      /**
+       * 建立 WebSocket 连接
+       */
+      function connectWebSocket() {
+        const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+        const wsUrl = protocol + '://' + location.host + '/ws';
+        socket = new WebSocket(wsUrl);
+        socket.onopen = () => {
+          console.log('WebSocket connected');
+        };
+        socket.onmessage = (event) => {
+          const data = JSON.parse(event.data);
+          switch (data.type) {
+            case 'assign':
+              myColor = data.color;
+              statusEl.textContent = `你是 ${myColor === 'red' ? '红方' : '黑方'}`;
+              break;
+            case 'move':
+              movePiece(data.from, data.to, false);
+              break;
+            case 'reset':
+              initBoard();
+              renderPieces();
+              statusEl.textContent = '局面已重置';
+              break;
+          }
+        };
+        socket.onclose = () => {
+          console.log('WebSocket closed');
+          statusEl.textContent = '连接已断开';
+        };
+        socket.onerror = (err) => {
+          console.error('WebSocket error', err);
+        };
+      }
+
+      // 初始化
+      initBoard();
+      drawBoard();
+      renderPieces();
+      connectWebSocket();
+      // 事件绑定
+      piecesContainer.addEventListener('click', onPieceClick);
+      canvas.addEventListener('click', onBoardClick);
+    })();
+  </script>
+</body>
+</html>
